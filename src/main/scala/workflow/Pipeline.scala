@@ -26,6 +26,45 @@ class Pipeline[A, B] private[workflow] (
 
   def toPipeline: Pipeline[A, B] = this
 
+  final def withData[A, B](estimator: Estimator[A, B], data: PipelineDataset[A]): Pipeline[A, B] = {
+    val optimizedGraph = PipelineEnv.getOrCreate.getOptimizer.execute(executor.graph, Map())._1
+
+    var estFittingExecutor = new GraphExecutor(optimizedGraph, optimize = false)
+    val delegatingNodes = optimizedGraph.operators.collect {
+      case (node, _: DelegatingOperator) => node
+    }
+
+    val graphWithFitEstimators = delegatingNodes.foldLeft(optimizedGraph) {
+      case (curGraph, node) => {
+        val deps = optimizedGraph.getDependencies(node)
+        val estimatorDep = deps.head
+
+        // check if the current estimator should be fit to the new data
+        val estNodeId = estimatorDep.asInstanceOf[NodeId]
+        val curEstimator = curGraph.getOperator(estNodeId).asInstanceOf[EstimatorOperator]
+
+        val transformer = {
+          if (curEstimator != estimator)
+            estFittingExecutor.execute(estimatorDep).get.asInstanceOf[TransformerOperator]
+          else
+            curEstimator.fitRDDs(Seq(DatasetOperator(data.get()).execute(Seq())))
+        }
+
+        curGraph.setOperator(node, transformer).setDependencies(node, deps.tail)
+      }
+    }
+
+    val newGraph = UnusedBranchRemovalRule.apply(graphWithFitEstimators, Map())._1
+
+    val transformerGraph = TransformerGraph(
+      newGraph.sources,
+      newGraph.sinkDependencies,
+      newGraph.operators.map(op => (op._1, op._2.asInstanceOf[TransformerOperator])),
+      newGraph.dependencies)
+
+    new FittedPipeline[A, B](transformerGraph, source, sink).toPipeline
+  }
+
   /**
    * Fit all Estimators in this pipeline to produce a [[FittedPipeline]].
    * It is logically equivalent, but only contains Transformers in the underlying graph.
