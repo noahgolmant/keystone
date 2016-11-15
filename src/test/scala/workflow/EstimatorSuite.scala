@@ -64,4 +64,30 @@ class EstimatorSuite extends FunSuite with PipelineContext with Logging {
     assert(results.get().collect().toSeq === Seq(42 + 10, 58 + 10, 61 + 10))
   }
 
+  test("Test incremental estimator withData") {
+    sc = new SparkContext("local", "test")
+
+    val transformer = Transformer[Int, Int](_ * 2)
+
+    val intEstimator = new IncrementalEstimator[Int, Int, Int] {
+      override def fit(data: RDD[Int], oldModel: Int): Int = data.collect().last + oldModel
+
+      override def transformer(model: Int): Transformer[Int, Int] = Transformer(x => x + model)
+    }
+
+    val trainData = sc.parallelize(Seq(12, 94, 32))
+    val trainDataTwo = sc.parallelize(Seq(15, 10, 5))
+    val testData = sc.parallelize(Seq(42, 58, 61))
+
+    val (pipeline, firstModel) = intEstimator.withData(PipelineDataset(transformer(trainData)), PipelineDatum(0))
+    assert(firstModel.get == 64)
+
+    val (newPipeline, secondModel) = intEstimator.withData(PipelineDataset(transformer(trainData)), firstModel)
+    assert(secondModel.get == 64*2)
+    assert(pipeline.apply(testData).get().collect().toSeq === Seq(42 + 64, 58 + 64, 61 + 64))
+    assert(newPipeline.apply(testData).get().collect().toSeq === Seq(42 + 64*2, 58 + 64*2, 61 + 64*2))
+
+
+  }
+
 }

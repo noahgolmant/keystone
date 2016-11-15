@@ -124,6 +124,25 @@ private[workflow] abstract class EstimatorOperator extends Operator with Seriali
   }
 }
 
+private[workflow] abstract class IncrementalEstimatorOperator extends Operator with Serializable {
+  private[workflow] def fitRDDs(inputs: Seq[DatasetExpression], model: DatumExpression): TransformerOperator
+
+  override def execute(deps: Seq[Expression]): TransformerExpression = {
+    val rdds = deps.collect {
+      case data: DatasetExpression => data
+    }
+
+    val datum = deps.collect {
+      case datum: DatumExpression => datum
+    }.headOption
+
+    require(datum.isDefined)
+    require(rdds.size == deps.size - 1)
+
+    new TransformerExpression(fitRDDs(rdds, datum.get))
+  }
+}
+
 /**
  * This Operator is used to apply the output of an [[EstimatorOperator]] to new data.
  * It takes a [[TransformerExpression]] as its first dependency, accesses the contained
