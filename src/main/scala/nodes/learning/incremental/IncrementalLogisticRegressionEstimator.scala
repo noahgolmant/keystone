@@ -1,11 +1,11 @@
 package nodes.learning.incremental
 
 
-import org.apache.spark.mllib.classification.{LogisticRegressionModel => MLlibLRM}
+import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithSGD, LogisticRegressionModel => MLlibLRM}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.mllib.linalg.{Vectors, Vector => MLlibVector}
 import breeze.linalg.Vector
-import org.apache.spark.mllib.optimization.{LBFGS, LogisticGradient, SquaredL2Updater}
+import org.apache.spark.mllib.optimization.{GradientDescent, LBFGS, LogisticGradient, SquaredL2Updater}
 import org.apache.spark.mllib.regression.{GeneralizedLinearAlgorithm, LabeledPoint}
 import org.apache.spark.mllib.util.DataValidators
 import utils.MLlibUtils.breezeVectorToMLlib
@@ -19,6 +19,8 @@ import scala.reflect.ClassTag
   */
 class IncrementalLogisticRegressionEstimator[T <: Vector[Double] : ClassTag](
         numClasses: Int,
+        stepSize: Double,
+        miniBatchFraction: Double,
         regParam: Double = 0,
         numIters: Int = 100,
         convergenceTol: Double = 1E-4,
@@ -42,46 +44,45 @@ class IncrementalLogisticRegressionEstimator[T <: Vector[Double] : ClassTag](
   }
 
   /**
-    * Train a classification model for Multinomial/Binary Logistic Regression using
-    * Limited-memory BFGS. Standard feature scaling and L2 regularization are used by default.
-    * NOTE: Labels used in Logistic Regression should be {0, 1, ..., k - 1}
-    * for k classes multi-label classification problem.
+    * Train a logistic regression model using mini-batch SGD.
+    * @param stepSize
+    * @param numIterations
+    * @param regParam
+    * @param miniBatchFraction
     */
-  private[this] class LogisticRegressionWithLBFGS(numClasses: Int, numFeaturesValue: Int)
+  private[this] class LogisticRegressionWithSGD (
+      private var stepSize: Double,
+      private var numIterations: Int,
+      private var regParam: Double,
+      private var miniBatchFraction: Double)
     extends GeneralizedLinearAlgorithm[MLlibLRM] with Serializable {
 
-    this.numFeatures = numFeaturesValue
-    override val optimizer = new LBFGS(new LogisticGradient, new SquaredL2Updater)
+    private val gradient = new LogisticGradient()
+    private val updater = new SquaredL2Updater()
 
-    override protected val validators = List(multiLabelValidator)
+    override val optimizer = new GradientDescent(gradient, updater)
+      .setStepSize(stepSize)
+      .setNumIterations(numIterations)
+      .setRegParam(regParam)
+      .setMiniBatchFraction(miniBatchFraction)
+    override protected val validators = List(DataValidators.binaryLabelValidator)
 
-    require(numClasses > 1)
-    numOfLinearPredictor = numClasses - 1
-    if (numClasses > 2) {
-      optimizer.setGradient(new LogisticGradient(numClasses))
+    override protected[mllib] def createModel(weights: MLlibVector, intercept: Double) = {
+      new MLlibLRM(weights, intercept)
     }
 
-    private def multiLabelValidator: RDD[LabeledPoint] => Boolean = { data =>
-      if (numOfLinearPredictor > 1) {
-        DataValidators.multiLabelValidator(numOfLinearPredictor + 1)(data)
-      } else {
-        DataValidators.binaryLabelValidator(data)
-      }
-    }
-
-    override protected def createModel(weights: MLlibVector, intercept: Double) = {
-      if (numOfLinearPredictor == 1) {
-        new MLlibLRM(weights, intercept)
-      } else {
-        new MLlibLRM(weights, intercept, numFeatures, numOfLinearPredictor + 1)
-      }
-    }
   }
+
 
   override def fit(data: RDD[T], labels: RDD[Int], oldModel: MLlibLRM = initialModel): MLlibLRM = {
     val labeledPoints = labels.zip(data).map(x => LabeledPoint(x._1, breezeVectorToMLlib(x._2)))
-    val trainer = new LogisticRegressionWithLBFGS(numClasses, numFeatures)
-    trainer.setValidateData(false).optimizer.setNumIterations(numIters).setRegParam(regParam)
+    val trainer = new LogisticRegressionWithSGD(
+      stepSize,
+      numIters,
+      regParam,
+      miniBatchFraction)
+
+    trainer.setValidateData(false)
 
     val model = trainer.run(labeledPoints, oldModel.weights)
     model
