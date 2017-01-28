@@ -5,7 +5,9 @@ import org.apache.spark.mllib.classification.{LogisticRegressionModel => MLlibLR
 import org.apache.spark.rdd.RDD
 import org.apache.spark.mllib.linalg.{Vectors, Vector => MLlibVector}
 import breeze.linalg.Vector
-import org.apache.spark.mllib.optimization.{GradientDescent, LogisticGradient, SquaredL2Updater}
+import org.apache.spark.mllib.optimization.{GradientDescent, LBFGS, LogisticGradient, SquaredL2Updater}
+import org.apache.spark.mllib.regression.{GeneralizedLinearAlgorithm, LabeledPoint}
+import org.apache.spark.mllib.util.DataValidators
 import utils.MLlibUtils.breezeVectorToMLlib
 import workflow.{IncrementalLabelEstimator, Transformer}
 
@@ -43,20 +45,51 @@ class ModelAvgIncrementaLREstimator[T <: Vector[Double] : ClassTag](
     }
   }
 
+  /**
+    * Train a classification model for Multinomial/Binary Logistic Regression using
+    * Limited-memory BFGS. Standard feature scaling and L2 regularization are used by default.
+    * NOTE: Labels used in Logistic Regression should be {0, 1, ..., k - 1}
+    * for k classes multi-label classification problem.
+    */
+  private[this] class LogisticRegressionWithLBFGS(numClasses: Int, numFeaturesValue: Int)
+    extends GeneralizedLinearAlgorithm[MLlibLRM] with Serializable {
+
+    this.numFeatures = numFeaturesValue
+    override val optimizer = new LBFGS(new LogisticGradient, new SquaredL2Updater)
+
+    override protected val validators = List(multiLabelValidator)
+
+    require(numClasses > 1)
+    numOfLinearPredictor = numClasses - 1
+    if (numClasses > 2) {
+      optimizer.setGradient(new LogisticGradient(numClasses))
+    }
+
+    private def multiLabelValidator: RDD[LabeledPoint] => Boolean = { data =>
+      if (numOfLinearPredictor > 1) {
+        DataValidators.multiLabelValidator(numOfLinearPredictor + 1)(data)
+      } else {
+        DataValidators.binaryLabelValidator(data)
+      }
+    }
+
+    override protected def createModel(weights: MLlibVector, intercept: Double) = {
+      if (numOfLinearPredictor == 1) {
+        new MLlibLRM(weights, intercept)
+      } else {
+        new MLlibLRM(weights, intercept, numFeatures, numOfLinearPredictor + 1)
+      }
+    }
+  }
+
   override def fit(data: RDD[T], labels: RDD[Int], oldModel: Model = initialModel): Model = {
-    //val labeledPoints = labels.zip(data).map(x => LabeledPoint(x._1, breezeVectorToMLlib(x._2)))
-    val labeledPoints = labels.zip(data).map(x => (x._1.toDouble, breezeVectorToMLlib(x._2)))
-    val (weights: Vector[Double], _) = GradientDescent.runMiniBatchSGD(
-      labeledPoints,
-      new LogisticGradient(),
-      new SquaredL2Updater(),
-      stepSize,
-      numIters,
-      regParam,
-      miniBatchFraction,
-      initialWeights,
-      convergenceTol
-    )
+    val labeledPoints = labels.zip(data).map(x => LabeledPoint(x._1, breezeVectorToMLlib(x._2)))
+    //val labeledPoints = labels.zip(data).map(x => (x._1.toDouble, breezeVectorToMLlib(x._2)))
+
+    val trainer = new LogisticRegressionWithLBFGS(numClasses, numFeatures)
+    trainer.setValidateData(false).optimizer.setNumIterations(numIters).setRegParam(regParam)
+    val model = trainer.run(labeledPoints)
+    val weights: Vector[Double] = model.weights.asInstanceOf[Vector[Double]]
 
     val newCount = oldModel.iteration + 1
     val oldWeightVector = Vector(oldModel.lrModel.weights.toArray)
