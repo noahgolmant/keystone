@@ -89,7 +89,7 @@ class ModelAvgIncrementaLREstimator[T <: Vector[Double] : ClassTag](
     val trainer = new LogisticRegressionWithLBFGS(numClasses, numFeatures)
     trainer.setValidateData(false).optimizer.setNumIterations(numIters).setRegParam(regParam)
     val model = trainer.run(labeledPoints)
-    val weights: Vector[Double] = model.weights.asInstanceOf[Vector[Double]]
+    val weights: Vector[Double] = Vector(model.weights.toArray)
 
     val newCount = oldModel.iteration + 1
     val oldWeightVector = Vector(oldModel.lrModel.weights.toArray)
